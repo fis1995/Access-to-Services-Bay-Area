@@ -1,0 +1,495 @@
+---
+title: "Access to Ballot Drop-off Locations"
+author: "Francine Stephens"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+## Access to the Ballot Box in the Bay Area 2020
+
+Access to the ballot box is crucial for the smooth functioning of democracy in any election. In the midst of a pandemic, access to the ballot box is more crucial than ever for promoting civic participation as well as public health guidelines. [UnBox](https://www.unboxproject.org/), a non-profit that focuses on key social service provision in the Bay Area has collected information on ballot drop-off locations for the 2020 General election. In this report, I have utilized the data provided by unBox that is posted on the [Bay Community Resource Navigation Tool](https://www.bayareacommunity.org/#/) to conduct an equity analysis of *the accessibility of ballot drop-off sites by the wage of workers in the Bay Area.* 
+
+I am particularly focused on understanding how low wage workers fare in accessibility because in my experience working with the Democratic Party's voter protection team, prioritizing voting sites in lower income neighborhoods tends to not be looked at because poverty/low-income is not a protected status under discrimination-law as race is. I am using this report as an opportunity to focus on this target population.
+
+**About the Data & Preparation**
+
+**Ballot drop-off sites:** UnBox data includes many types of services, but for this analysis, only ballot drop-off sites were retained along with the geographic coordinates in order to map the locations. 7 of the sites in the unBox data did not have geographic coordinates, so I geocoded those sites in order to include them in the analysis.It is important to note that some of these sites closed at points in the before or on election day, however, they were all included purpose of this analysis in order to understand the full extent of where sites were located during the run up to the election. Future study should include a spatio-temporal analysis of accessibility. 
+
+Isochrones were constructed around each ballot drop-off location in order to measure accessibility. Isochrones designate an accessibility zone around a point based on mode and travel time. For this analysis, two different isochrones of accessibility were considered - *10 minute walking distance* and *5 minute driving time*. It is important to note that *isochrones as a measure of access assume that travel time is the most important factor in determining access.*
+
+**Low wage workers:**The target population in the equity analysis is low wage workers. I use the worker-earnings measure for the the LODES Worker Area Characteristics dataset to operationalize this measure. The LODES data includes three categories of jobs: earns At most 1250 dollars per month, between 1251 and 3333 dollars per month, and more than 3333 dollars per month. I consider the first two categories as representative of low wage workers in the Bay Area. *I also assume that each job is representative of one person. In many cases, there may be a one-to-one correspondence between the number of jobs and the people who fill them, but that may not always be the case. If that is so, than this analysis can be seen as a conservative estimate of the number and share of low-wage workers who can easily access a ballot drop-off site.* 
+
+These data are at the block group for this analysis. The block groups were intersected with the isochrones of access to determine the total number of jobs/people included in the boundaries of the isochrone. The estimated counts of jobs/workers in the block groups that intersected the accessibility zone were aggregated to find the total number of workers in the ballot drop-off zone's service region. The share of workers by each wage level was graphed in a pie chart to visualize the levels of accessibility for workers of different wage levels.
+
+
+```{r setup, include=F, warning=F, message=F}
+knitr::opts_chunk$set(echo=F)
+
+packages <- c(
+              "readxl", 
+              "lehdr",
+              "tidyverse",
+              "sf",
+              "ggplot2",
+              "plotly",
+              "tigris",
+              "leaflet",
+              "RColorBrewer", 
+              "censusapi", 
+              "tidycensus", 
+              "corrplot", 
+              "stargazer",
+              "mapboxapi",
+              "tidygeocoder"
+              )
+lapply(packages, library, character.only = T)
+
+```
+
+## Ballot Drop-off Locations
+---
+
+Let's start by getting a sense of where ballot drop-off locations are in the Bay Area. There are a total of 341 ballot drop-off locations in the Bay Area. Table 1 shows the number of ballot drop off sites by county. Santa Clara and Alameda Counties have the most, whereas Marin and Napa have the fewest locations. 
+
+
+```{r Data cleaning, echo=F, message=F, warning=F}
+# PREP BALLOT DROP-OFF DATA
+sfbi_database <- read_csv("SFBI_Database.csv")
+  # summary(sfbi_database)
+  # table(sfbi_database$taxonomy)
+
+ballot_drops <- sfbi_database %>%
+  select(
+    Name,
+    id, 
+    `address_1 (from address) (from locations) 2`:`longitude (from locations) 2`,
+    active,
+    service_options,
+    taxonomy,
+    `Last updated`
+    ) %>%
+  filter(
+    taxonomy == "Ballot Drop Off"
+    )
+
+# Grab 7 locations missing lat and longs and geocode them
+ballot_drops_nolatlng <- ballot_drops %>%
+  filter(
+    is.na(`longitude (from locations) 2`) | is.na(`latitude (from locations) 2`)) %>%
+  mutate(state = "CA")
+  
+ballot_drops_wlatlng <- ballot_drops_nolatlng %>% 
+  geocode(street = `address_1 (from address) (from locations) 2`,
+          city = `city (from address) (from locations) 3`,
+          state = "state",
+          postalcode = `Zip Code (from address) (from locations) 3`,
+          method = 'census',
+          lat = lat,
+          long = long) %>%
+  select(-state)
+
+# Add geometry all ballot locations
+ballot_drops_shp <- 
+  ballot_drops %>%
+  filter(
+    !is.na(`longitude (from locations) 2`)
+    ) %>%
+  mutate(lat = as.numeric(`latitude (from locations) 2`),
+         long = as.numeric(`longitude (from locations) 2`)
+         ) %>%
+  rbind(ballot_drops_wlatlng) %>%
+  select(-`latitude (from locations) 2`, -`longitude (from locations) 2`) %>%
+  st_as_sf(
+    coords = c("long", "lat")
+    ) %>%
+  st_set_crs(4326)
+
+# Spatial Data
+bay_county_names <-
+  c(
+    "Alameda",
+    "Contra Costa",
+    "Marin",
+    "Napa",
+    "San Francisco",
+    "San Mateo",
+    "Santa Clara",
+    "Solano",
+    "Sonoma"
+  )
+
+bay_counties <-
+  counties("CA", cb = T, progress_bar = F, year = 2018) %>%
+  filter(NAME %in% bay_county_names) %>%
+  st_transform(crs = 4326)
+  
+```
+
+```{r Descriptives of Ballot-Drop-offs, message=F, warning=F}
+# Join drop-off locations to counties and count
+ballot_drops_in_co <- st_join(ballot_drops_shp, bay_counties, join = st_within)
+
+knitr::kable(table(ballot_drops_in_co$NAME),
+             caption = "Table 1: Ballot Drop-off Sites by County",
+             col.names = c("County", "#"))
+
+```
+
+**Map 1: Ballot Drop-off Locations in the Bay Area, Nov. 3rd, 2020 General Election"**
+```{r Map all ballot locations, message=F, warning=F}
+leaflet() %>% 
+  addMapboxTiles(
+    style_id = "streets-v11",
+    username = "mapbox"
+  ) %>%
+  addCircleMarkers(
+    data = ballot_drops_shp,
+    radius = 1,
+    label = ~Name, 
+  ) %>%
+  addPolygons(
+    data=bay_counties,
+    fill = F,
+    color = "red",
+    weight = 2,
+    label = ~NAME
+  )
+
+```
+
+
+Based on the map, it appears that voting many locations in the South-Bay tend to be centrally located in the cities/towns and along interstate 101. 
+
+## Accessibility Zones for Ballot Drop-off Sites
+---
+
+Map 2 shows accessibility zones for the ballot drop-off sites based on a 10 minute walking distance. Isochrones were the spatial technique used to create these access zones. 
+
+**Map 2: 10 Minute Walking Access Zones for Ballot Drop-off Locations**
+```{r Isochrones}
+# Create accessibility isochrones
+walk_10min_bdo_bay <- mb_isochrone(
+  ballot_drops_shp,
+  profile = "walking",
+  time = 10
+)
+
+walk_10min_bdo_bay_info <-
+  ballot_drops_shp %>% 
+  st_set_geometry(NULL) %>% 
+  cbind(walk_10min_bdo_bay$geometry) %>% 
+  st_as_sf()
+
+leaflet() %>% 
+  addMapboxTiles(
+    style_id = "streets-v11",
+    username = "mapbox"
+  ) %>%
+  addPolygons(
+    data = walk_10min_bdo_bay_info,
+    label = ~Name
+  )
+
+```
+
+
+Map 3, shown below, applies the isochrone technique to create access zones around ballot drop-off locations based on a 5 minute driving time. Given that the Bay Area is more car-centric, than walkable, creating a driving-based access measure is also valuable. Not surprisingly, more land area is included in these isochrones of 5-minute driving duration than the ones in Map 2 for 10 minute walking distance. 
+
+
+**Map 3: 5 Minute Driving Access Zones for Ballot Drop-off Locations**
+```{r Isochrones driving}
+# Create accessibility isochrones
+drive_5min_bdo_bay <- mb_isochrone(
+  ballot_drops_shp,
+  profile = "driving",
+  time = 5
+)
+
+drive_5min_bdo_bay_info <-
+  ballot_drops_shp %>% 
+  st_set_geometry(NULL) %>% 
+  cbind(drive_5min_bdo_bay$geometry) %>% 
+  st_as_sf()
+
+leaflet() %>% 
+  addMapboxTiles(
+    style_id = "streets-v11",
+    username = "mapbox"
+  ) %>%
+  addPolygons(
+    data = drive_5min_bdo_bay_info,
+    label = ~Name
+  )
+
+```
+
+
+
+## Equity Analyses: Access to the Ballot Box for Low Wage Workers in the Bay
+---
+
+The first equity of access analysis uses the 10 minute walk isochrones. 
+
+**Equity of Access by 10 Minute Walk-Time**
+```{r Equity analysis based on low-wage workers preparation, echo=F, message=F, warning=F}
+# SET PARAMETERS
+Sys.setenv(CENSUS_KEY="99ccb52a629609683f17f804ca875115e3f0804c")
+
+# LOAD DATASETS
+bay_counties_bg <-
+  block_groups(state = "CA",
+               county = bay_county_names,
+               cb = T,
+               progress_bar = F,
+               year = 2017) %>%
+  st_transform(26910) %>% 
+  mutate(original_area = st_area(.))
+
+# 10 minute walk equity
+bay_bg_10min_walk_isochrone_intersect <-
+  bay_counties_bg %>% 
+  st_intersection(
+    walk_10min_bdo_bay_info %>% 
+      st_union() %>% 
+      st_transform(26910)
+  ) %>% 
+  mutate(
+    leftover_area = st_area(.),
+    perc_area = leftover_area / original_area
+  )
+
+bay_wac_bg <- grab_lodes(
+      state = "ca",
+      year = 2017,
+      lodes_type = "wac",
+      job_type = "JT01",
+      segment = "S000",
+      state_part = "main",
+      agg_geo = "bg"
+    ) %>%
+  filter(w_bg %in% bay_counties_bg$GEOID) %>%
+  select(w_bg:C000, CE01:CE03) %>%
+  rename(total_jobs = "C000",
+         `At most $1250/month` = "CE01",
+         `Between $1251-3333/month` = "CE02",
+         `More than $3333/month` = "CE03") %>%
+  pivot_longer(
+    ends_with("month"),
+    names_to = "job_earnings",
+    values_to = "estimated_count"
+  )
+saveRDS(bay_wac_bg, "bay_wac_bg.rds")
+```
+
+Table 2, below, the breakdown of wage earnings by the total Bay Area population. About 12% of the population earns no more than 1250 dollars per month. The vast majority of Bay Area workers are earning at least 3,334 dollars per month.
+
+```{r job-earnings breakdown in the bay, message=F, warning=F}
+bay_job_earnings <-
+  bay_wac_bg %>% 
+  mutate(job_earnings = factor(job_earnings,
+                         levels = unique(bay_wac_bg$job_earnings))) %>% 
+  group_by(job_earnings) %>% 
+  summarize(estimated_jobs = sum(estimated_count)) %>% 
+  mutate(
+    perc = estimated_jobs/sum(estimated_jobs),
+    group = "Full Population"
+  )
+
+knitr::kable(bay_job_earnings %>%
+               select(-group) %>%
+               mutate(estimated_jobs = format(estimated_jobs, big.mark   = ","),
+                      perc = format(perc, digits = 2)),
+             caption = "Table 2: Workers by Wage Type in the Bay Area",
+             col.names = c("Job Earnings", "#", "Proportion")
+             )
+```
+
+```{r walking estimates, warning=F, message=F}
+# Estimates of access by walking
+bay_ballot_walk_earnings <-
+  bay_wac_bg %>% 
+  mutate(job_earnings = factor(job_earnings,
+                         levels = unique(bay_wac_bg$job_earnings))) %>% 
+  left_join(
+    bay_bg_10min_walk_isochrone_intersect %>% 
+      select(w_bg = GEOID, perc_area) %>% 
+      st_set_geometry(NULL)
+  ) %>% 
+  filter(!is.na(perc_area)) %>% 
+  mutate(
+    estimate = estimated_count * perc_area
+  ) %>% 
+  group_by(job_earnings) %>% 
+  summarize(estimated_jobs = sum(estimate)) %>% 
+  mutate(
+    perc = estimated_jobs/sum(estimated_jobs),
+    group = "Within 10 min. walk of ballot drop-off place"
+  )
+
+knitr::kable(bay_ballot_walk_earnings %>%
+  select(`Job Earnings` = job_earnings, `# Workers` = estimated_jobs) %>%
+    mutate(`# Workers` = as.numeric((gsub("[1]", "", `# Workers`))),
+           `# Workers` = format(`# Workers`, digits = 2, big.mark = ",")),
+  caption = "Table 3: Workers by Wage Type within 10 Min Walk of Ballot Drop-off Site"
+  )
+```
+
+```{r }
+print(round(sum(bay_ballot_walk_earnings$estimated_jobs)/
+  sum(bay_job_earnings$estimated_jobs) * 100))
+
+```
+Approximately 20% of the Bay Area population is included in the 10 minute walking accessibility zones for the ballot drop-off sites. 
+
+
+```{r Pie Chart of walking equity analysis}
+
+rbind(bay_job_earnings, bay_ballot_walk_earnings) %>% 
+  ggplot(
+    aes(
+      x = "", 
+      y = perc, 
+      fill = reorder(job_earnings,desc(job_earnings))
+    )
+  ) + 
+  geom_bar(
+    stat = "identity", 
+    position = position_fill()
+  ) +
+  geom_text(
+    aes(label = paste0(round(perc*100),"%")), 
+    position = position_fill(vjust = 0.5)
+  ) +
+  coord_polar(theta = "y") +
+  facet_wrap(~ group)  +
+  scale_fill_brewer(palette = "Set2") +
+  theme_bw() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    legend.position = 'right'
+  ) + 
+  guides(
+    fill = guide_legend(nrow=3, byrow=TRUE)
+  ) +
+  labs(
+    fill = "Monthly Earnings of Workers",
+    title = "Chart 1: Walking Access to Ballot Drop-off Locations",
+    subtitle = "Bay Area, Fall 2020",
+    caption = "Data Sources: BayAreaCommunity.org, unboxproject.org, & LODES 2017"
+  ) 
+  
+
+```
+
+
+There aren't clear indications of unequal access by wage in Chart 1. The share of low wage workers - those earning no more than 3,333 dollars per month - in the walkability access zone is nearly identical to their proportions in the Bay Area population at large. 
+
+
+**Equity of Access by 5 Minute-Drive Time** 
+
+``` {r driving equity analysis, message=F, warning=F}
+# 5 minute drive equity analysis
+bay_bg_5min_drive_isochrone_intersect <-
+  bay_counties_bg %>% 
+  st_intersection(
+    drive_5min_bdo_bay_info %>% 
+      st_union() %>% 
+      st_transform(26910)
+  ) %>% 
+  mutate(
+    leftover_area = st_area(.),
+    perc_area = leftover_area / original_area
+  )
+
+bay_ballot_drive_earnings <-
+  bay_wac_bg %>% 
+  mutate(job_earnings = factor(job_earnings,
+                         levels = unique(bay_wac_bg$job_earnings))) %>% 
+  left_join(
+    bay_bg_5min_drive_isochrone_intersect %>% 
+      select(w_bg = GEOID, perc_area) %>% 
+      st_set_geometry(NULL)
+  ) %>% 
+  filter(!is.na(perc_area)) %>% 
+  mutate(
+    estimate = estimated_count * perc_area
+  ) %>% 
+  group_by(job_earnings) %>% 
+  summarize(estimated_jobs = sum(estimate)) %>% 
+  mutate(
+    perc = estimated_jobs/sum(estimated_jobs),
+    group = "Within 5 min. drive of ballot drop-off place"
+  )
+
+knitr::kable(bay_ballot_drive_earnings %>%
+  select(`Job Earnings` = job_earnings, `# Workers` = estimated_jobs) %>%
+    mutate(`# Workers` = as.numeric((gsub("[1]", "", `# Workers`))),
+           `# Workers` = format(`# Workers`, digits = 2, big.mark = ",")),
+  caption = "Table 4: Workers by Wage Type within 5 Min. Drive of Ballot Drop-off Site"
+  )
+
+```
+
+
+```{r total share in drive access}
+print(round(sum(bay_ballot_drive_earnings$estimated_jobs)/
+  sum(bay_job_earnings$estimated_jobs)*100))
+
+```
+
+
+Approximately 59% of the Bay Area population is within a 5 minute drive of a ballot drop-off box. This is 39 percentage points greater than the share of the population included in the 10 minute walking access zones. 
+
+
+```{r Pie Chart of driving equity analysis}
+# Visual for driving equity analysis
+rbind(bay_job_earnings, bay_ballot_drive_earnings) %>% 
+  ggplot(
+    aes(
+      x = "", 
+      y = perc, 
+      fill = reorder(job_earnings,desc(job_earnings))
+    )
+  ) + 
+  geom_bar(
+    stat = "identity", 
+    position = position_fill()
+  ) +
+  geom_text(
+    aes(label = paste0(round(perc*100),"%")), 
+    position = position_fill(vjust = 0.5)
+  ) +
+  coord_polar(theta = "y") +
+  facet_wrap(~ group)  +
+  scale_fill_brewer(palette = "Set2") +
+  theme_bw() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    legend.position = 'right'
+  ) + 
+  guides(
+    fill = guide_legend(nrow=3, byrow=TRUE)
+  ) +
+  labs(
+    fill = "Monthly Earnings of Workers",
+    title = "Chart 2: Driving Access to Ballot Drop-off Locations",
+    subtitle = "Bay Area, Fall 2020",
+    caption = "Data Sources: BayAreaCommunity.org, unboxproject.org, & LODES 2017"
+  ) 
+  
+```
+
+
+In Chart 2, the distribution of access looks quite similar to Chart 1. Low income workers have accessibility to ballot drop-off locations that parallels their share of the Bay Area population. Again, the highest earnings tier makes up over 60% of the accessibility zones.
+
+
+## Conclusions and Limitations
+---
+
+* The ballot drop-off access zones include earners at the same rate as their share in the overall Bay Area population. If we are taking equity to mean that the proportion of people in access zone in each earnings group mirrors the share in the population overall, then there is equal access. 
+  + **However, the case could be made that given all of the other barriers to civic participation that lower-income people face, that perhaps the distribution should be shifted such that the access zones include more low wage workers than higher wage workers.** 
+* It is important to note that **isochrones as a measure of access assume that travel time is the most important factor in determining access.** Although mode of transportation and travel time are factored into the measure, there are other considerations that can be factored into travel and routing decisions. For instance, time of day as well as the origin and destination and other stops that may need to happen along the way. 
+  + A limitation of this measure of access is that **the isochrones may not take into account changes to average drive time like time of day one is traveling or new construction/traffic on the road, which would shift the extent of the access zones.** 
+* The population of low-income residents was defined by the LODES data on worker area characteristics. People may not always be traveling from their place of work to the drop-off site. They may choose to vote closer to their place of residence, which may not be within the 5 minute drive of their workplace. **Therefore, supplemental analyses with datasets that have people as their unit of analysis rather than jobs, and feature residential area income characteristics like the ACS would be useful.**
